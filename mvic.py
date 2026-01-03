@@ -2,7 +2,7 @@
 """
 Converted from: Potvin & Fuglevand 2017 MATLAB data
 Preserves equations, parameters, and plotting layout.
-Dependencies: numpy, matplotlib
+Dependencies: numpy, matplotlib, tkinter
 """
 
 import numpy as np
@@ -467,7 +467,7 @@ else:
 muForceCapacityRel[::mujump, :] = Pnow[::mujump, :fthsamp] * 100.0 / P[::mujump, None]
 
 # -------------------------
-# Save CSV outputs (matching MATLAB dlmwrite names)
+# Calculate relative MU force capacity (used for plotting)
 # -------------------------
 # combo = [ns(:)/samprate, fth(:), Tact(:)/res/maxex * 100,Tstrength(:) * 100 ,Ptarget(:) * 100,TPtMAX(:)* 100];
 ns = np.arange(1, fthsamp + 1)
@@ -479,15 +479,9 @@ combo = np.column_stack((
     Ptarget * 100.0,
     TPtMAX * 100.0
 ))
-np.savetxt(f"{con} A - Target - Act - Strength (no adapt) - Force - Strength (w adapt).csv", combo, delimiter=',', header='time_s,target,act_percent,Strength_no_adapt_percent,Force_percent,Strength_with_adapt_percent', comments='')
-
-np.savetxt(f"{con} B - Firing Rate.csv", mufrFAT.T, delimiter=',')
-np.savetxt(f"{con} C - Individual MU Force Time-History.csv", muPt.T, delimiter=',')
-np.savetxt(f"{con} D - MU Capacity - relative.csv", muForceCapacityRel.T, delimiter=',')
-
 # -------------------------
 # Plotting: 4 vertically stacked panels sharing x-axis
-# Panel A: Excitation (Tact converted to excitation units), total muscle force capacity traces, target
+# Panel A: Excitation (Tact converted to excitation units)
 # Panel B: Firing rate of each MU over time (thin lines), highlight every 20th MU
 # Panel C: Force contribution of each MU over time (thin lines), highlight every 20th MU
 # Panel D: MU capacity at endurance time vs MU index
