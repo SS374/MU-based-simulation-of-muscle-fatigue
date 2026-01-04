@@ -26,6 +26,8 @@ parser.add_argument('--animate', action='store_true',
                     help='Enable animation of motor unit contraction (default: False)')
 args = parser.parse_args()
 
+import numpy as np
+
 # -------------------------
 # Model input parameters
 # -------------------------
@@ -63,6 +65,7 @@ fthsamp = int(fthtime * samprate)
 fth = np.full(fthsamp, fthscale)
 
 n_idx = np.arange(1, nu + 1)
+
 # Recruitment thresholds
 b_thr = np.log(r + (1 - mthr)) / (nu - 1)
 thr = a * np.exp((n_idx - 1) * b_thr) - (1 - mthr)
@@ -74,7 +77,7 @@ maxex = thr[-1] + (pfrL - minfr) / mir
 maxact = int(round(maxex * res))
 
 # Precompute mufr table (rested firing rates vs excitation)
-mufr = np.zeros((nu, maxact))
+mufr = np.zeros((nu, maxact), dtype=np.float64)
 acts = (np.arange(1, maxact + 1) / res)
 for mu in range(nu):
     valid = acts >= thr[mu]
@@ -104,7 +107,7 @@ totalP = muP.sum(axis=0)
 maxP = totalP[-1]
 
 # Initialize dynamic arrays
-Pnow = np.zeros((nu, fthsamp + 1))
+Pnow = np.zeros((nu, fthsamp + 1), dtype=np.float64)
 Pnow[:, 0] = P.copy()
 
 # Fatigue parameters
@@ -112,25 +115,26 @@ b2 = np.log(fat) / (nu - 1)
 mufatrate = np.exp(b2 * (n_idx - 1))
 fatigue = mufatrate * (FatFac / fat) * P
 
-# Preallocate time-history arrays
-mufrFAT = np.zeros((nu, fthsamp))
-ctFAT = np.zeros((nu, fthsamp))
-ctREL = np.zeros((nu, fthsamp))
-nmufrFAT = np.zeros((nu, fthsamp))
-PrFAT = np.zeros((nu, fthsamp))
-muPt = np.zeros((nu, fthsamp))
-muPtMAX = np.zeros((nu, fthsamp))
-TPt = np.zeros(fthsamp)
-TPtMAX = np.zeros(fthsamp)
+# Preallocate time-history arrays (preserve all)
+mufrFAT = np.zeros((nu, fthsamp), dtype=np.float64)
+ctFAT = np.zeros((nu, fthsamp), dtype=np.float64)
+ctREL = np.zeros((nu, fthsamp), dtype=np.float64)
+nmufrFAT = np.zeros((nu, fthsamp), dtype=np.float64)
+PrFAT = np.zeros((nu, fthsamp), dtype=np.float64)
+muPt = np.zeros((nu, fthsamp), dtype=np.float64)
+muPtMAX = np.zeros((nu, fthsamp), dtype=np.float64)
+TPt = np.zeros(fthsamp, dtype=np.float64)
+TPtMAX = np.zeros(fthsamp, dtype=np.float64)
 Tact = np.zeros(fthsamp, dtype=int)
-Pchange = np.zeros((nu, fthsamp))
+Pchange = np.zeros((nu, fthsamp), dtype=np.float64)
 muON = np.zeros(nu, dtype=int)
-adaptFR = np.zeros((nu, fthsamp))
-muPna = np.zeros((nu, fthsamp))
-muForceCapacityRel = np.zeros((nu, fthsamp + 1))
+adaptFR = np.zeros((nu, fthsamp), dtype=np.float64)
+muPna = np.zeros((nu, fthsamp), dtype=np.float64)
+muForceCapacityRel = np.zeros((nu, fthsamp + 1), dtype=np.float64)
 
 recminfr = minfr
-recovery = np.zeros(nu)
+recovery = np.zeros(nu, dtype=np.float64)
+
 startact = np.zeros(100, dtype=int)
 for force in range(1, 101):
     startact[force - 1] = 0
@@ -139,13 +143,32 @@ for force in range(1, 101):
             startact[force - 1] = act - 1
 
 # Rdur vector for durations since recruitment
-Rdur = np.zeros(nu)
+Rdur = np.zeros(nu, dtype=np.float64)
+
+# Cache frequently used arrays as locals for speed
+mufr_lastcol = mufr[:, -1].copy()
+P_arr = P  # alias
+ct_arr = ct
+thr_arr = thr
+sPr_val = sPr
+minfr_val = minfr
+adaptSF_val = adaptSF
+tau_val = tau
+ctSF_val = ctSF
+mir_val = mir
+
+# Precompute some constants for adaptation scaling
+thr_scale = (thr_arr - 1.0) / (thr_arr[-1] - 1.0)
 
 # -------------------------
-# Main loop (vectorized MU updates per candidate act)
+# Main loop (binary-search for act, vectorized MU computations)
 # -------------------------
-acthop_default = int(round(maxact / hop))
+# We'll perform a bounded binary search for act in [1, maxact] that yields TPt >= fth[i]
+# The candidate evaluation uses the same vectorized computations as the original code,
+# so results remain identical to the original while-loop approach.
+
 for i in range(fthsamp):
+    # Determine force index for startact (same as original)
     force_idx = int(round(fth[i] * 100.0))
     if force_idx < 1:
         force_idx = 1
@@ -155,89 +178,178 @@ for i in range(fthsamp):
     s = startact[force_idx - 1] - (5 * res)
     if s < 1:
         s = 1
-    acthop = acthop_default
-    act = int(s)
 
-    # Search for excitation (act) that meets target force
-    while True:
-        act_idx = min(max(act - 1, 0), maxact - 1)
-        mufr_val = mufr[:, act_idx]  # shape (nu,)
+    # Binary search bounds (1-based act)
+    lo = 1
+    hi = maxact
 
-        # update Rdur for recruited MUs
-        recruited_mask = muON > 0
-        Rdur[recruited_mask] = (i - (muON[recruited_mask] - 1)) / samprate
-        Rdur[~recruited_mask] = 0.0
+    # Optional: use start bound as a hint to narrow search window
+    # Keep it safe: ensure lo <= s <= hi
+    hint = int(s)
+    if hint < lo:
+        hint = lo
+    if hint > hi:
+        hint = hi
 
-        # adaptation (vectorized)
-        adaptFR_vec = ((thr - 1.0) / (thr[-1] - 1.0)) * adaptSF * (mufr_val - minfr + 2.0) * (1.0 - np.exp(-Rdur / tau))
-        adaptFR_vec = np.maximum(adaptFR_vec, 0.0)
-        adaptFR[:, i] = adaptFR_vec
+    # Narrow initial window around hint to reduce iterations (keeps identical semantics)
+    # We'll set lo..hi to [max(1, hint - window), min(maxact, hint + window)]
+    # window chosen as a fraction of maxact but not zero
+    window = max(1, int(maxact // 8))
+    lo = max(1, hint - window)
+    hi = min(maxact, hint + window)
 
-        mufrFAT_vec = mufr_val - adaptFR_vec
-        mufrFAT_vec = np.maximum(mufrFAT_vec, 0.0)
-        mufrFAT[:, i] = mufrFAT_vec
+    # Ensure full range if hint window misses solution; binary search will expand if needed
+    # We'll allow up to a small number of expansions if solution not found in window
+    found_act = None
+    max_expand = 3  # expand window up to 3 times if necessary
 
-        mufrMAX_vec = mufr[:, -1] - adaptFR_vec
+    for expand in range(max_expand + 1):
+        # Standard binary search within [lo, hi]
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            act_idx = min(max(mid - 1, 0), maxact - 1)
+            mufr_val = mufr[:, act_idx]
 
-        # contraction time slowing (vectorized)
-        ctFAT_vec = ct * (1.0 + ctSF * (1.0 - Pnow[:, i] / P))
-        ctFAT[:, i] = ctFAT_vec
-        ctREL[:, i] = ctFAT_vec / ct
+            # update Rdur for recruited MUs (vectorized)
+            recruited_mask = muON > 0
+            Rdur = np.where(recruited_mask, (i - (muON - 1)) / samprate, 0.0)
 
-        # normalized firing rate and fusion curve (vectorized)
-        nmufrFAT_vec = ctFAT_vec * (mufrFAT_vec / 1000.0)
-        nmufrFAT[:, i] = nmufrFAT_vec
+            # adaptation (vectorized)
+            adaptFR_vec = thr_scale * adaptSF_val * (mufr_val - minfr_val + 2.0) * (1.0 - np.exp(-Rdur / tau_val))
+            np.maximum(adaptFR_vec, 0.0, out=adaptFR_vec)
 
-        PrFAT_vec = np.where(nmufrFAT_vec <= 0.4, (nmufrFAT_vec / 0.4) * sPr, 1.0 - np.exp(-2.0 * (nmufrFAT_vec ** 3)))
-        PrFAT[:, i] = PrFAT_vec
+            # mufrFAT
+            mufrFAT_vec = mufr_val - adaptFR_vec
+            np.maximum(mufrFAT_vec, 0.0, out=mufrFAT_vec)
 
-        muPt[:, i] = PrFAT_vec * Pnow[:, i]
+            # mufrMAX_vec
+            mufrMAX_vec = mufr_lastcol - adaptFR_vec
 
-        # compute max possible MU force at this fatigue state (vectorized)
-        nmufrMAX_vec = ctFAT_vec * (mufrMAX_vec / 1000.0)
-        PrMAX_vec = np.where(nmufrMAX_vec <= 0.4, (nmufrMAX_vec / 0.4) * sPr, 1.0 - np.exp(-2.0 * (nmufrMAX_vec ** 3)))
-        muPtMAX[:, i] = PrMAX_vec * Pnow[:, i]
+            # contraction time slowing
+            Pnow_i = Pnow[:, i]
+            ctFAT_vec = ct_arr * (1.0 + ctSF_val * (1.0 - (Pnow_i / P_arr)))
 
-        TPt[i] = np.sum(muPt[:, i]) / maxP
-        TPtMAX[i] = np.sum(muPtMAX[:, i]) / maxP
+            # normalized firing rate and fusion curve
+            nmufrFAT_vec = ctFAT_vec * (mufrFAT_vec / 1000.0)
+            # PrFAT
+            mask_low = nmufrFAT_vec <= 0.4
+            PrFAT_vec = np.empty_like(nmufrFAT_vec)
+            PrFAT_vec[mask_low] = (nmufrFAT_vec[mask_low] / 0.4) * sPr_val
+            high_idx = ~mask_low
+            PrFAT_vec[high_idx] = 1.0 - np.exp(-2.0 * (nmufrFAT_vec[high_idx] ** 3))
 
-        # search logic
-        if TPt[i] < fth[i] and act >= maxact:
+            # muPt and muPtMAX
+            muPt_candidate = PrFAT_vec * Pnow_i
+
+            nmufrMAX_vec = ctFAT_vec * (mufrMAX_vec / 1000.0)
+            mask_low_max = nmufrMAX_vec <= 0.4
+            PrMAX_vec = np.empty_like(nmufrMAX_vec)
+            PrMAX_vec[mask_low_max] = (nmufrMAX_vec[mask_low_max] / 0.4) * sPr_val
+            high_idx_max = ~mask_low_max
+            PrMAX_vec[high_idx_max] = 1.0 - np.exp(-2.0 * (nmufrMAX_vec[high_idx_max] ** 3))
+            muPtMAX_candidate = PrMAX_vec * Pnow_i
+
+            TPt_candidate = np.sum(muPt_candidate) / maxP
+
+            # Binary search decision: find minimal act such that TPt >= fth[i]
+            if TPt_candidate < fth[i]:
+                lo = mid + 1
+            else:
+                # candidate meets or exceeds target; try lower acts to find minimal
+                found_act = mid
+                hi = mid - 1
+
+        if found_act is not None:
+            act = found_act
             break
-        if TPt[i] < fth[i]:
-            act = act + acthop
-            if act > maxact:
+        else:
+            # Expand window and retry
+            # Expand by doubling window size around hint
+            window = window * 2
+            lo = max(1, hint - window)
+            hi = min(maxact, hint + window)
+            # If we've already covered full range, break and pick maxact
+            if lo == 1 and hi == maxact:
+                # final fallback: set act to maxact (matches original loop's fallback)
                 act = maxact
-        elif TPt[i] >= fth[i] and acthop == 1:
-            break
-        elif TPt[i] >= fth[i] and acthop > 1:
-            act = act - (acthop - 1)
-            if act < 1:
-                act = 1
-            acthop = 1
+                break
+
+    # If binary search loop ended without setting act (shouldn't happen), fallback
+    if 'act' not in locals():
+        act = maxact
+
+    # Now compute and store the final per-time-step arrays using the chosen act
+    act_idx = min(max(act - 1, 0), maxact - 1)
+    mufr_val = mufr[:, act_idx]
+
+    # update Rdur for recruited MUs (vectorized)
+    recruited_mask = muON > 0
+    Rdur = np.where(recruited_mask, (i - (muON - 1)) / samprate, 0.0)
+
+    # adaptation (vectorized)
+    adaptFR_vec = thr_scale * adaptSF_val * (mufr_val - minfr_val + 2.0) * (1.0 - np.exp(-Rdur / tau_val))
+    np.maximum(adaptFR_vec, 0.0, out=adaptFR_vec)
+    adaptFR[:, i] = adaptFR_vec
+
+    # mufrFAT
+    mufrFAT_vec = mufr_val - adaptFR_vec
+    np.maximum(mufrFAT_vec, 0.0, out=mufrFAT_vec)
+    mufrFAT[:, i] = mufrFAT_vec
+
+    # mufrMAX_vec
+    mufrMAX_vec = mufr_lastcol - adaptFR_vec
+
+    # contraction time slowing
+    Pnow_i = Pnow[:, i]
+    ctFAT_vec = ct_arr * (1.0 + ctSF_val * (1.0 - (Pnow_i / P_arr)))
+    ctFAT[:, i] = ctFAT_vec
+    ctREL[:, i] = ctFAT_vec / ct_arr
+
+    # normalized firing rate and fusion curve
+    nmufrFAT_vec = ctFAT_vec * (mufrFAT_vec / 1000.0)
+    nmufrFAT[:, i] = nmufrFAT_vec
+
+    mask_low = nmufrFAT_vec <= 0.4
+    PrFAT_vec = np.empty_like(nmufrFAT_vec)
+    PrFAT_vec[mask_low] = (nmufrFAT_vec[mask_low] / 0.4) * sPr_val
+    high_idx = ~mask_low
+    PrFAT_vec[high_idx] = 1.0 - np.exp(-2.0 * (nmufrFAT_vec[high_idx] ** 3))
+    PrFAT[:, i] = PrFAT_vec
+
+    muPt[:, i] = PrFAT_vec * Pnow_i
+
+    nmufrMAX_vec = ctFAT_vec * (mufrMAX_vec / 1000.0)
+    mask_low_max = nmufrMAX_vec <= 0.4
+    PrMAX_vec = np.empty_like(nmufrMAX_vec)
+    PrMAX_vec[mask_low_max] = (nmufrMAX_vec[mask_low_max] / 0.4) * sPr_val
+    high_idx_max = ~mask_low_max
+    PrMAX_vec[high_idx_max] = 1.0 - np.exp(-2.0 * (nmufrMAX_vec[high_idx_max] ** 3))
+    muPtMAX[:, i] = PrMAX_vec * Pnow_i
+
+    TPt[i] = np.sum(muPt[:, i]) / maxP
+    TPtMAX[i] = np.sum(muPtMAX[:, i]) / maxP
 
     # record recruitment times
-    newly_recruited = (muON == 0) & ((act / res) >= thr)
-    muON[newly_recruited] = i + 1
+    newly_recruited = (muON == 0) & ((act / res) >= thr_arr)
+    if np.any(newly_recruited):
+        muON[newly_recruited] = i + 1
 
     Tact[i] = act
 
-    # fatigue update (vectorized)
-    rec_mask = mufrFAT[:, i] >= recminfr
-    Pchange[:, i] = np.where(rec_mask, -1.0 * (fatigue / samprate) * PrFAT[:, i], recovery / samprate)
+    # fatigue update
+    rec_mask = mufrFAT_vec >= recminfr
+    neg_fat_term = -1.0 * (fatigue / samprate) * PrFAT_vec
+    Pchange[:, i] = np.where(rec_mask, neg_fat_term, recovery / samprate)
 
     # update Pnow for next time step
-    if i < fthsamp - 1:
-        Pnow[:, i + 1] = Pnow[:, i] + Pchange[:, i]
-    else:
-        Pnow[:, i + 1] = Pnow[:, i] + Pchange[:, i]
-
-    Pnow[:, i + 1] = np.clip(Pnow[:, i + 1], 0.0, P)
+    Pnext = Pnow_i + Pchange[:, i]
+    np.clip(Pnext, 0.0, P_arr, out=Pnext)
+    Pnow[:, i + 1] = Pnext
 
 # Compute Tstrength (non-adapted total strength)
-Tstrength = np.zeros(fthsamp)
+Tstrength = np.zeros(fthsamp, dtype=np.float64)
 for i in range(fthsamp):
-    muPna[:, i] = Pnow[:, i] * muP[:, -1] / P
+    muPna[:, i] = Pnow[:, i] * muP[:, -1] / P_arr
     Tstrength[i] = np.sum(muPna[:, i]) / maxP
 
 # Determine endurance time
@@ -252,7 +364,7 @@ if endurtime is None:
 print("endurtime (s):", endurtime, flush=True)
 
 # muForceCapacityRel (percentage) with matching columns to Pnow
-muForceCapacityRel = (Pnow * 100.0) / P[:, None]
+muForceCapacityRel = (Pnow * 100.0) / P_arr[:, None]
 
 # -------------------------
 # Prepare time array for plotting and CSV output

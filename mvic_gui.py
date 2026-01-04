@@ -68,21 +68,24 @@ class MVICGui(QtWidgets.QWidget):
         main = QtWidgets.QVBoxLayout(self)
 
         # Parameters group (only public flags)
-        params = QtWidgets.QGroupBox("Simulation Parameters (public flags)")
+        params = QtWidgets.QGroupBox("Simulation Parameters")
+        params.setStyleSheet("QGroupBox { font-weight: bold; }")
         grid = QtWidgets.QGridLayout()
+        grid.setSpacing(10)
+        grid.setContentsMargins(10, 10, 10, 10)
         params.setLayout(grid)
 
         # --nu
-        grid.addWidget(QtWidgets.QLabel("Number of motor units (--nu):"), 0, 0)
+        grid.addWidget(QtWidgets.QLabel("Number of motor units (1-250):"), 0, 0)
         self.spin_nu = QtWidgets.QSpinBox()
-        self.spin_nu.setRange(1, 10000)
-        self.spin_nu.setValue(200)
+        self.spin_nu.setRange(1, 250)
+        self.spin_nu.setValue(120)
         self.spin_nu.setSingleStep(1)
         grid.addWidget(self.spin_nu, 0, 1)
 
         # --fthscale
         # --fthscale as percentage
-        grid.addWidget(QtWidgets.QLabel("Target % MVIC (--fthscale):"), 1, 0)
+        grid.addWidget(QtWidgets.QLabel("Target % MVIC (0-100%)"), 1, 0)
         self.spin_fth_percent = QtWidgets.QSpinBox()
         self.spin_fth_percent.setRange(1, 100)
         self.spin_fth_percent.setValue(80)   # default 80%
@@ -90,9 +93,9 @@ class MVICGui(QtWidgets.QWidget):
 
 
         # --fthtime
-        grid.addWidget(QtWidgets.QLabel("Task duration seconds (--fthtime):"), 2, 0)
+        grid.addWidget(QtWidgets.QLabel("Task duration in seconds (1-500):\nLonger times take more time to simulate"), 2, 0)
         self.spin_time = QtWidgets.QDoubleSpinBox()
-        self.spin_time.setRange(0.1, 86400.0)
+        self.spin_time.setRange(1.0, 500.0)
         self.spin_time.setSingleStep(1.0)
         self.spin_time.setValue(20.0)
         grid.addWidget(self.spin_time, 2, 1)
