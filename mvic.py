@@ -552,8 +552,12 @@ axA.set_title('Panel A: Excitation')
 # Panel B: firing rates
 # Only plot MUs with non-zero firing rates
 for mu in range(nu):
-    if np.any(mufrFAT[mu, :] > 0):  # Only plot if MU has non-zero firing rate
-        axB.plot(time, mufrFAT[mu, :], color='lightblue', linewidth=0.5)
+    mask = mufrFAT[mu, :] > 0
+    if np.any(mask):  # Only plot if MU has non-zero firing rate
+        # Create masked arrays to only show non-zero values
+        masked_time = np.ma.masked_where(~mask, time)
+        masked_fr = np.ma.masked_where(~mask, mufrFAT[mu, :])
+        axB.plot(masked_time, masked_fr, color='lightblue', linewidth=0.5)
 
 # highlight specific MUs: 1, 20, 40, 60, 80, 100, 120
 # but only if they have non-zero firing rates
@@ -568,7 +572,11 @@ highlight_colors = {
     119: 'darkviolet'
 }
 for mu in highlight_mus:
-    axB.plot(time, mufrFAT[mu, :], linewidth=1.5, color=highlight_colors.get(mu, None), label=f'MU {mu+1}')
+    mask = mufrFAT[mu, :] > 0
+    if np.any(mask):
+        masked_time = np.ma.masked_where(~mask, time)
+        masked_fr = np.ma.masked_where(~mask, mufrFAT[mu, :])
+        axB.plot(masked_time, masked_fr, linewidth=1.5, color=highlight_colors.get(mu, None), label=f'MU {mu+1}')
 axB.set_ylabel('Firing rate (imp/s)')
 axB.set_title('Panel B: MU firing rates over time')
 if endurtime is not None:
@@ -577,12 +585,20 @@ if endurtime is not None:
 # Panel C: MU force contributions
 # Only plot MUs with non-zero force contributions
 for mu in range(nu):
-    if np.any(muPt[mu, :] > 0):  # Only plot if MU has non-zero force contribution
-        axC.plot(time, muPt[mu, :], color='lightgray', linewidth=0.5)
+    mask = muPt[mu, :] > 0
+    if np.any(mask):  # Only plot if MU has non-zero force contribution
+        # Create masked arrays to only show non-zero values
+        masked_time = np.ma.masked_where(~mask, time)
+        masked_force = np.ma.masked_where(~mask, muPt[mu, :])
+        axC.plot(masked_time, masked_force, color='lightgray', linewidth=0.5)
+
 # highlight the same specific MUs as in Panel B, but only if they have non-zero force
 for mu in highlight_mus:
-    if np.any(muPt[mu, :] > 0):  # Only plot if MU has non-zero force contribution
-        axC.plot(time, muPt[mu, :], linewidth=1.5, color=highlight_colors.get(mu, None), label=f'MU {mu+1}')
+    mask = muPt[mu, :] > 0
+    if np.any(mask):  # Only plot if MU has non-zero force contribution
+        masked_time = np.ma.masked_where(~mask, time)
+        masked_force = np.ma.masked_where(~mask, muPt[mu, :])
+        axC.plot(masked_time, masked_force, linewidth=1.5, color=highlight_colors.get(mu, None), label=f'MU {mu+1}')
 axC.set_ylabel('MU force contribution')
 axC.set_title('Panel C: MU force contributions over time')
 if endurtime is not None:
